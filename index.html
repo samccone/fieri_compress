@@ -1,0 +1,182 @@
+<html>
+<canvas id="c" width=95 height=97></canvas>
+<canvas id="c2" width=95 height=97></canvas>
+<canvas id="c3" width=95 height=97></canvas>
+<script>
+    class EncodedImage {
+        constructor(width) {
+            if (width > 255) {
+                throw new Error('width can not be larger than 255');
+            }
+
+            this.width = width;
+            this.colors = new Map();
+            this.pixels = [];
+        }
+
+        static runlengthExpode(bytes) {
+            const ret = [];
+            for (let i = 0; i < bytes.length; i++) {
+                let baseColor = bytes[i];
+                let runLength = 0;
+                // Check to see if high bit is on
+                const repeatOff = baseColor & 128
+
+                if (repeatOff) {
+                    // turn off high bit for base color
+                    ret.push(baseColor & 127);
+                } else {
+                    runLength = bytes[i + 1];
+                    ret.push(baseColor);
+                    ret.push(...(new Array(bytes[i + 1]).fill(bytes[i])))
+                    // skip repeat value
+                    i++;
+                }
+
+            }
+
+            return ret;
+        }
+
+        runlengthEncode() {
+            const ret = [];
+            let prev = null;
+            for (let p of this.pixels) {
+                if (prev == null) {
+                    prev = p;
+                    ret.push(...[p, 0]);
+                } else {
+                    if (p === prev && ret[ret.length - 1] < 127) {
+                        ret[ret.length - 1]++;
+                    } else {
+                        prev = p;
+                        ret.push(...[p, 0]);
+                    }
+                }
+            }
+
+            // Take any 0 repeat values .. and instead of pushing 0s set the high bit
+            // of the color value to ON by |ing to indicate it is a 0 value
+            const deflated = [];
+            for (let i = 0; i < ret.length; i++) {
+                if (i % 2 === 1 && ret[i] === 0) {
+                    // set the high bit to ON to indicate no repetition
+                    deflated[deflated.length - 1] = deflated[deflated.length - 1] | 128;
+                } else {
+                    deflated.push(ret[i])
+                }
+            }
+
+            return deflated
+        }
+
+        encode() {
+            // 3 bits per color 0 - 7
+            // Math.ceil(3 * this.colors.size / 8)
+            const indexedColors = [];
+            for (let k of this.colors.keys()) {
+                for (let v of k.split(',')) {
+                    indexedColors.push(Number(v))
+                }
+            }
+
+            // 2 bytes for index color length
+            // ...INDEX COLORS...
+            // 3 bytes per INDEX R,G,B
+            // 1 byte for total width
+            // 1 byte for index color.
+            // IF high bit is set on index color look at next index to determine repeat length
+            // length of repeat will be 1 byte 
+            const arr = new Uint8Array([
+                ...[255, indexedColors.length - 255],
+                ...indexedColors,
+                this.width,
+                ...this.runlengthEncode()
+            ])
+            return arr;
+        }
+
+        static decode(bytes) {
+            const length = bytes[0] + bytes[1];
+            const colors = new Map();
+            for (let i = 0; i < length; i += 3) {
+                colors.set(`${bytes[2 + i]},${bytes[2 + i + 1]},${bytes[2 + i + 2]}`, i / 3 + 1)
+            }
+
+            const ret = new EncodedImage(bytes[2 + length]);
+            ret.colors = colors;
+            ret.pixels.push(...EncodedImage.runlengthExpode(bytes.subarray(2 + length + 1)));
+            return ret;
+        }
+
+        *decodedPixels() {
+            const reverseMap = new Map();
+            for (let k of this.colors.keys()) {
+                reverseMap.set(this.colors.get(k), k);
+            }
+
+            for (let [idx, p] of this.pixels.entries()) {
+                yield [idx, reverseMap.get(p).split(',').map(v => Number(v) * 32)];
+            }
+        }
+
+        addPixel(color) {
+            const r = Math.floor(color[0] / 32);
+            const g = Math.floor(color[1] / 32);
+            const b = Math.floor(color[2] / 32);
+
+            if (this.colors.has([r, g, b].join(','))) {
+                this.pixels.push(this.colors.get([r, g, b].join(',')));
+            } else {
+                this.colors.set([r, g, b].join(','), this.colors.size + 1);
+                this.pixels.push(this.colors.size);
+            }
+
+            if (this.colors.size > 127) {
+                throw new Error('Sorry this encoder can only handle 127 unique RGB combos');
+            }
+        }
+    }
+
+    (async () => {
+        const encoded = new EncodedImage(95);
+        const d = await (await fetch('data.json')).json();
+        const c = document.querySelector('#c');
+        const c2 = document.querySelector('#c2');
+        const ctx = c.getContext('2d');
+        const ctx2 = c2.getContext('2d');
+        const ctx3 = c3.getContext('2d');
+        const compiled = new Uint8Array()
+        const bits = [];
+
+        for (let y = 0; y < 97; y++) {
+            for (let x = 0; x < 95; x++) {
+                const r = d[y][x][0];
+                const g = d[y][x][1];
+                const b = d[y][x][2];
+                ctx.fillStyle = `rgb(${r},${g},${b})`;
+                ctx.fillRect(x, y, 1, 1);
+                bits.push(
+                    Math.floor(r / 32),
+                    Math.floor(g / 32),
+                    Math.floor(b / 32),
+                );
+
+                encoded.addPixel([r, g, b])
+                ctx2.fillStyle = `rgb(${Math.floor(r / 32) * 32},${Math.floor(g / 32) * 32},${Math.floor(b / 32) * 32})`;
+                ctx2.fillRect(x, y, 1, 1);
+            }
+        }
+
+        const bytes = encoded.encode();
+        const decoded = EncodedImage.decode(bytes);
+        console.log(bytes.length);
+        for ([idx, rgb] of decoded.decodedPixels()) {
+            ctx3.fillStyle = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+            ctx3.fillRect(idx % decoded.width, Math.floor(idx / decoded.width), 1, 1);
+        }
+    })();
+
+</script>
+
+</html>
